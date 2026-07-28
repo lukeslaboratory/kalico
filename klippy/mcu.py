@@ -833,6 +833,12 @@ class MCU:
         self._mcu_tick_awake = 0.0
         self._config_crc = 0
 
+        # Bounded USB-serial link resurrection: how long serialhdl may
+        # spend reopening a re-enumerated device before the connection
+        # is condemned. 0 disables (previous behavior).
+        self._serial.resurrect_timeout = config.getfloat(
+            "serial_resurrect_timeout", 10.0, minval=0.0
+        )
         # noncritical mcus
         self.is_non_critical = config.getboolean("is_non_critical", False)
         if self.is_non_critical and self.get_name() == "mcu":
@@ -1541,6 +1547,15 @@ class MCU:
             or self.is_fileoutput()
             or self._is_timeout
         ):
+            return
+        # A USB link resurrection is in progress (or just completed and
+        # the clock sync is still catching up): don't declare the MCU
+        # lost while the bounded reattach window plus a short resync
+        # allowance is open.
+        resurrect_deadline = getattr(
+            self._serial, "link_resurrect_deadline", 0.0
+        )
+        if resurrect_deadline and eventtime < resurrect_deadline + 5.0:
             return
         if self.is_non_critical:
             self.handle_non_critical_disconnect()

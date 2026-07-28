@@ -24,6 +24,18 @@ class SerialReader:
         self.mcu = mcu
         # Serial port
         self.serial_dev = None
+        # USB-serial link resurrection state
+        self.serialport = None
+        self.serial_baud = 250000
+        self.serial_rts = True
+        self.resurrect_timeout = 10.0
+        self.link_resurrect_deadline = 0.0
+        # Parked pyserial objects: their fd NUMBER is owned by the
+        # serialqueue after dup2(), so they must stay referenced (a
+        # garbage-collected pyserial closes its fd) until disconnect()
+        # tears the queue down. One object is kept per resurrection, by
+        # design.
+        self._parked_devs = []
         self.msgparser = msgproto.MessageParser(warn_prefix=warn_prefix)
         # C interface
         self.ffi_main, self.ffi_lib = chelper.get_ffi()
@@ -46,6 +58,12 @@ class SerialReader:
         while True:
             self.ffi_lib.serialqueue_pull(self.serialqueue, response)
             count = response.len
+            if count == -2:
+                # Link parked after a read failure (USB re-enumeration
+                # or similar); try to reattach from reactor context.
+                self.reactor.register_async_callback(
+                    self._attempt_resurrect)
+                continue
             if count < 0:
                 break
             if response.notify_id:
@@ -276,6 +294,9 @@ class SerialReader:
     def connect_uart(self, serialport, baud, rts=True):
         # Initial connection
         logging.info("%sStarting serial connect", self.warn_prefix)
+        self.serialport = serialport
+        self.serial_baud = baud
+        self.serial_rts = rts
         start_time = self.reactor.monotonic()
         while 1:
             if (
@@ -301,6 +322,55 @@ class SerialReader:
             ret = self._start_session(serial_dev)
             if ret:
                 break
+
+    def _attempt_resurrect(self, eventtime):
+        # A SQT_UART link was parked after a read failure (typically a
+        # USB re-enumeration: the MCU and its protocol state are intact,
+        # only the host descriptor died). Reopen the SAME device path --
+        # /dev/serial/by-id/ names are stable across re-enumeration --
+        # and hand the fresh descriptor to the parked serialqueue, which
+        # resumes the session by retransmitting all unacked blocks.
+        # Bounded; on expiry the connection is closed through the
+        # existing fatal path. Runs in reactor context.
+        if self.serialqueue is None or self.serialport is None:
+            return
+        if self.resurrect_timeout <= 0.0:
+            logging.error(
+                "%sUSB link lost and resurrection disabled"
+                " - closing connection", self.warn_prefix)
+            self.ffi_lib.serialqueue_exit(self.serialqueue)
+            return
+        deadline = self.reactor.monotonic() + self.resurrect_timeout
+        self.link_resurrect_deadline = deadline
+        logging.warning(
+            "%sUSB link lost - attempting reattach of %s for up to %.1fs",
+            self.warn_prefix, self.serialport, self.resurrect_timeout)
+        while self.reactor.monotonic() < deadline:
+            if self.serialqueue is None:
+                self.link_resurrect_deadline = 0.0
+                return  # disconnected meanwhile
+            try:
+                serial_dev = serial.Serial(
+                    baudrate=self.serial_baud, timeout=0, exclusive=True
+                )
+                serial_dev.port = self.serialport
+                serial_dev.rts = self.serial_rts
+                serial_dev.open()
+            except (OSError, IOError, serial.SerialException):
+                self.reactor.pause(self.reactor.monotonic() + 0.25)
+                continue
+            self._parked_devs.append(self.serial_dev)
+            self.serial_dev = serial_dev
+            self.ffi_lib.serialqueue_reattach(
+                self.serialqueue, serial_dev.fileno())
+            self.link_resurrect_deadline = 0.0
+            logging.warning("%sUSB link reattached - session resumed",
+                            self.warn_prefix)
+            return
+        self.link_resurrect_deadline = 0.0
+        logging.error("%sUSB link reattach window expired"
+                      " - closing connection", self.warn_prefix)
+        self.ffi_lib.serialqueue_exit(self.serialqueue)
 
     def check_connect(self, serialport, baud, rts=True):
         serial_dev = serial.Serial(baudrate=baud, timeout=0, exclusive=False)
@@ -335,6 +405,13 @@ class SerialReader:
         if self.serial_dev is not None:
             self.serial_dev.close()
             self.serial_dev = None
+        for dev in self._parked_devs:
+            try:
+                dev.close()
+            except Exception:
+                pass
+        del self._parked_devs[:]
+        self.link_resurrect_deadline = 0.0
         for pn in self.pending_notifications.values():
             pn.complete(None)
         self.pending_notifications.clear()

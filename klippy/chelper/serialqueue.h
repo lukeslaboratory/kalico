@@ -29,6 +29,7 @@ struct serialqueue;
 struct serialqueue *serialqueue_alloc(int serial_fd, char serial_fd_type
                                       , int client_id);
 void serialqueue_exit(struct serialqueue *sq);
+void serialqueue_reattach(struct serialqueue *sq, int new_fd);
 void serialqueue_free(struct serialqueue *sq);
 struct command_queue *serialqueue_alloc_commandqueue(void);
 void serialqueue_free_commandqueue(struct command_queue *cq);

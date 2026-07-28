@@ -41,6 +41,11 @@ struct serialqueue {
     struct pollreactor *pr;
     int serial_fd, serial_fd_type, client_id;
     int pipe_fds[2];
+    // Link resurrection (SQT_UART): parked state plus the idle pipe
+    // whose read end stands in for a dead descriptor while the host
+    // reopens the device (see input_event / serialqueue_reattach)
+    int park_fds[2];
+    int link_down, link_down_notify;
     uint8_t input_buf[4096];
     uint8_t need_sync;
     int input_pos;
@@ -321,6 +326,29 @@ input_event(struct serialqueue *sq, double eventtime)
         int ret = read(sq->serial_fd, &sq->input_buf[sq->input_pos]
                        , sizeof(sq->input_buf) - sq->input_pos);
         if (ret <= 0) {
+            if (sq->serial_fd_type == SQT_UART && !sq->link_down) {
+                // Park the link instead of dying: a USB re-enumeration
+                // presents as EOF/EIO here while the MCU and all
+                // protocol state are perfectly intact. Swap the dead
+                // descriptor for the read end of a never-written pipe
+                // (same fd number, so the poll loop needs no changes)
+                // and tell the host thread to attempt a reattach (a
+                // -2 return from serialqueue_pull).
+                if (ret < 0)
+                    report_errno("read (parking link)", ret);
+                else
+                    errorf("Got EOF when reading from device"
+                           " - parking link for reattach");
+                pthread_mutex_lock(&sq->lock);
+                sq->link_down = 1;
+                sq->link_down_notify = 1;
+                dup2(sq->park_fds[0], sq->serial_fd);
+                sq->input_pos = 0;
+                sq->need_sync = 1;
+                check_wake_receive(sq);
+                pthread_mutex_unlock(&sq->lock);
+                return;
+            }
             if(ret < 0)
                 report_errno("read", ret);
             else
@@ -366,6 +394,11 @@ kick_event(struct serialqueue *sq, double eventtime)
 static void
 do_write(struct serialqueue *sq, void *buf, int buflen)
 {
+    if (sq->link_down)
+        // Link is parked awaiting reattach: drop the write. The blocks
+        // remain queued in sent_queue/pending and are retransmitted
+        // after serialqueue_reattach().
+        return;
     if (sq->serial_fd_type != SQT_CAN) {
         int ret = write(sq->serial_fd, buf, buflen);
         if (ret < 0)
@@ -405,6 +438,10 @@ do_write(struct serialqueue *sq, void *buf, int buflen)
 static double
 retransmit_event(struct serialqueue *sq, double eventtime)
 {
+    if (sq->link_down)
+        // Nothing to retransmit into while parked; check back cheaply.
+        // serialqueue_reattach() forces this timer to PR_NOW on resume.
+        return eventtime + 0.250;
     if (sq->serial_fd_type == SQT_UART) {
         int ret = tcflush(sq->serial_fd, TCOFLUSH);
         if (ret < 0)
@@ -644,6 +681,12 @@ serialqueue_alloc(int serial_fd, char serial_fd_type, int client_id)
     int ret = pipe(sq->pipe_fds);
     if (ret)
         goto fail;
+    // Idle pipe standing in for a dead descriptor while a parked
+    // SQT_UART link awaits reattach; its write end is never written.
+    ret = pipe(sq->park_fds);
+    if (ret)
+        goto fail;
+    fd_set_non_blocking(sq->park_fds[0]);
 
     // Reactor setup
     sq->pr = pollreactor_alloc(SQPF_NUM, SQPT_NUM, sq);
@@ -713,6 +756,28 @@ serialqueue_exit(struct serialqueue *sq)
         report_errno("pthread_join", ret);
 }
 
+// Resume a parked SQT_UART connection on a freshly opened descriptor.
+// dup2() copies the new description over the parked fd number, so the
+// background thread's poll loop resumes on the live device without
+// ever having known the difference. All unacked blocks are then
+// force-retransmitted; the seq/ack protocol resumes the session.
+void __visible
+serialqueue_reattach(struct serialqueue *sq, int new_fd)
+{
+    pthread_mutex_lock(&sq->lock);
+    dup2(new_fd, sq->serial_fd);
+    fd_set_non_blocking(sq->serial_fd);
+    sq->link_down = 0;
+    sq->link_down_notify = 0;
+    sq->input_pos = 0;
+    sq->need_sync = 1;
+    sq->rto = MIN_RTO;
+    pthread_mutex_unlock(&sq->lock);
+    pollreactor_update_timer(sq->pr, SQPT_RETRANSMIT, PR_NOW);
+    kick_bg_thread(sq);
+    errorf("Serial link reattached - resuming session");
+}
+
 // Free all resources associated with a serialqueue
 void __visible
 serialqueue_free(struct serialqueue *sq)
@@ -735,6 +800,8 @@ serialqueue_free(struct serialqueue *sq)
         message_queue_free(&cq->upcoming_queue);
     }
     pthread_mutex_unlock(&sq->lock);
+    close(sq->park_fds[0]);
+    close(sq->park_fds[1]);
     pollreactor_free(sq->pr);
     free(sq);
 }
@@ -856,6 +923,15 @@ serialqueue_pull(struct serialqueue *sq, struct pull_queue_message *pqm)
     while (list_empty(&sq->receive_queue)) {
         if (pollreactor_is_exit(sq->pr))
             goto exit;
+        if (sq->link_down_notify) {
+            // Tell the host thread (exactly once per park) that the
+            // link went down so it can attempt a reattach immediately
+            // instead of waiting for clock starvation.
+            sq->link_down_notify = 0;
+            pqm->len = -2;
+            pthread_mutex_unlock(&sq->lock);
+            return;
+        }
         sq->receive_waiting = 1;
         int ret = pthread_cond_wait(&sq->cond, &sq->lock);
         if (ret)

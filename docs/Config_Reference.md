@@ -64,6 +64,14 @@ serial:
 #   Setting this to True will allow the mcu to be disconnected and
 #   reconnected at will without errors. Helpful for USB-accelerometer boards
 #   and USB/CAN-probes
+#serial_resurrect_timeout: 10.0
+#   If a USB-serial connection to this MCU fails at the transport level
+#   (device re-enumeration, EOF/EIO on read), hold the session and
+#   attempt to re-open the same serial path for this many seconds
+#   before declaring the MCU lost. The session resumes only if the MCU
+#   retained its state (it never rebooted); a rebooted MCU is still
+#   treated as a fatal error exactly as before. Set to 0 to disable.
+#   The default is 10 seconds.
 ```
 
 ### [mcu my_extra_mcu]
