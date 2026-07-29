@@ -560,6 +560,17 @@ build_and_send_command(struct serialqueue *sq, uint8_t *buf, int pending
 static double
 check_send_command(struct serialqueue *sq, int pending, double eventtime)
 {
+    if (sq->link_down) {
+        // Do not build blocks while parked.  Building assigns sequence
+        // numbers, which makes the messages retransmit-verbatim after
+        // reattach even if their clocks went stale during the outage
+        // (field-observed: a heater PWM queue_digital_out built while
+        // parked was retransmitted 0.5s stale and tripped the MCU's
+        // "Timer too close" protection).  Left in the pending queues,
+        // stale messages are dropped by serialqueue_reattach() instead.
+        sq->need_kick_clock = MAX_CLOCK;
+        return PR_NEVER;
+    }
     if (sq->send_seq - sq->receive_seq >= MAX_PENDING_BLOCKS
         && sq->receive_seq != (uint64_t)-1)
         // Need an ack before more messages can be sent
