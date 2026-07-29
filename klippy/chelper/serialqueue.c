@@ -46,6 +46,7 @@ struct serialqueue {
     // reopens the device (see input_event / serialqueue_reattach)
     int park_fds[2];
     int link_down, link_down_notify;
+    double park_time;
     uint8_t input_buf[4096];
     uint8_t need_sync;
     int input_pos;
@@ -342,6 +343,7 @@ input_event(struct serialqueue *sq, double eventtime)
                 pthread_mutex_lock(&sq->lock);
                 sq->link_down = 1;
                 sq->link_down_notify = 1;
+                sq->park_time = eventtime;
                 dup2(sq->park_fds[0], sq->serial_fd);
                 sq->input_pos = 0;
                 sq->need_sync = 1;
@@ -767,6 +769,50 @@ serialqueue_reattach(struct serialqueue *sq, int new_fd)
     pthread_mutex_lock(&sq->lock);
     dup2(new_fd, sq->serial_fd);
     fd_set_non_blocking(sq->serial_fd);
+    // Drop queued-but-unsent messages whose requested clock passed
+    // during the outage.  Short-horizon periodic commands (heater and
+    // fan PWM are scheduled only ~0.3s ahead, far less than a USB
+    // re-enumeration takes) keep accumulating while parked; delivering
+    // the stale copies after resume trips the MCU's "Timer too close"
+    // protection.  They are safe to discard: no sequence number is
+    // assigned before transmission, and the periodic scheduler sends a
+    // fresh copy within one cycle.  Messages carrying a notify_id
+    // (completions are awaited host-side) are always kept.
+    int dropped = 0;
+    double curtime = get_monotonic();
+    if (sq->ce.est_freq) {
+        uint64_t drop_clock = clock_from_time(&sq->ce
+                                              , curtime + MIN_REQTIME_DELTA);
+        struct command_queue *cq, *ncq;
+        list_for_each_entry_safe(cq, ncq, &sq->pending_queues, node) {
+            struct queue_message *qm, *nqm;
+            list_for_each_entry_safe(qm, nqm, &cq->ready_queue, node) {
+                if (qm->notify_id || !qm->req_clock
+                    || qm->req_clock == BACKGROUND_PRIORITY_CLOCK
+                    || qm->req_clock >= drop_clock)
+                    continue;
+                list_del(&qm->node);
+                sq->ready_bytes -= qm->len;
+                message_free(qm);
+                dropped++;
+            }
+            list_for_each_entry_safe(qm, nqm, &cq->upcoming_queue, node) {
+                if (qm->notify_id || !qm->req_clock
+                    || qm->req_clock == BACKGROUND_PRIORITY_CLOCK
+                    || qm->req_clock >= drop_clock)
+                    continue;
+                list_del(&qm->node);
+                sq->upcoming_bytes -= qm->len;
+                message_free(qm);
+                dropped++;
+            }
+            if (list_empty(&cq->ready_queue)
+                && list_empty(&cq->upcoming_queue))
+                list_del(&cq->node);
+        }
+    }
+    double outage = sq->park_time ? curtime - sq->park_time : 0.;
+    sq->park_time = 0.;
     sq->link_down = 0;
     sq->link_down_notify = 0;
     sq->input_pos = 0;
@@ -775,7 +821,8 @@ serialqueue_reattach(struct serialqueue *sq, int new_fd)
     pthread_mutex_unlock(&sq->lock);
     pollreactor_update_timer(sq->pr, SQPT_RETRANSMIT, PR_NOW);
     kick_bg_thread(sq);
-    errorf("Serial link reattached - resuming session");
+    errorf("Serial link reattached - resuming session"
+           " (outage %.3fs, dropped %d stale commands)", outage, dropped);
 }
 
 // Free all resources associated with a serialqueue
