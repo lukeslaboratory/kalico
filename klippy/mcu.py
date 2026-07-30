@@ -834,13 +834,24 @@ class MCU:
         self._config_crc = 0
 
         # Bounded USB-serial link resurrection: how long serialhdl may
-        # spend reopening a re-enumerated device before the connection
-        # is condemned. 0 disables (previous behavior).
-        self._serial.resurrect_timeout = config.getfloat(
-            "serial_resurrect_timeout", 10.0, minval=0.0
-        )
         # noncritical mcus
         self.is_non_critical = config.getboolean("is_non_critical", False)
+        # spend reopening a re-enumerated device before the connection
+        # is condemned. 0 disables (previous behavior). Non-critical MCUs
+        # default to DISABLED: they already have their own full
+        # disconnect/reconnect machinery, and parking their link hides
+        # the disconnect from it while application-layer watchdogs (e.g.
+        # the Beacon streaming timeout) shut the whole printer down
+        # waiting for data the parked link cannot deliver. Field-observed:
+        # a 1s hub outage resumed all links, but Beacon's "sensor not
+        # receiving data" check fired first. Letting a non-critical MCU
+        # die fast is the correct behavior -- that is what non-critical
+        # means.
+        self._serial.resurrect_timeout = config.getfloat(
+            "serial_resurrect_timeout",
+            0.0 if self.is_non_critical else 10.0,
+            minval=0.0,
+        )
         if self.is_non_critical and self.get_name() == "mcu":
             raise error("Primary MCU cannot be marked as non-critical!")
         if self.is_non_critical:
