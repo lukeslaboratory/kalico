@@ -331,7 +331,16 @@ class Homing:
         retract_dist = hi.retract_dist
         if hmove.moved_less_than_dist(hi.min_home_dist, force_axes):
             needs_rehome = True
-            retract_dist = hi.min_home_dist
+            # Retract FARTHER than min_home_dist before the re-home: the
+            # second home must itself travel at least min_home_dist to be
+            # accepted, and retracting exactly min_home_dist leaves zero
+            # margin -- the wall sits at exactly the required distance, so
+            # the first trigger's latency (trigger fires slightly past
+            # first contact) makes the re-home come up short and raise
+            # "Early homing trigger on second home!" nearly every time
+            # this recovery path runs (e.g. any re-home started close to
+            # the endstop, such as from a parked carriage).
+            retract_dist = hi.min_home_dist * 1.5
 
         # Perform second home
         if retract_dist:
