@@ -388,6 +388,11 @@ class TMC5160:
         set_config_field = self.fields.set_config_field
         #   GCONF
         set_config_field(config, "multistep_filt", True)
+        #   TCOOLTHRS -- StallGuard/CoolStep lower velocity threshold.
+        # tmc2209 already exposes this; on the 5160 a nonzero value lets
+        # the config gate StallGuard above the homing accel ramp (the
+        # homing hook only installs its wide-open gate when this is 0).
+        set_config_field(config, "tcoolthrs", 0)
         #   CHOPCONF
         set_config_field(config, "toff", 3)
         set_config_field(config, "hstrt", 5)
