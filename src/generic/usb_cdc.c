@@ -6,6 +6,7 @@
 
 #include <string.h> // memmove
 #include "autoconf.h" // CONFIG_USB_VENDOR_ID
+#include "board/io.h" // readb
 #include "board/misc.h" // console_sendf
 #include "board/pgm.h" // PROGMEM
 #include "board/usb_cdc_ep.h" // USB_CDC_EP_BULK_IN
@@ -39,9 +40,12 @@ usb_notify_bulk_in(void)
     sched_wake_task(&usb_bulk_in_wake);
 }
 
+static void usb_check_reset(void);
+
 void
 usb_bulk_in_task(void)
 {
+    usb_check_reset();
     if (!sched_check_wake(&usb_bulk_in_wake))
         return;
     uint_fast8_t tpos = transmit_pos, max_tpos = tpos;
@@ -99,6 +103,7 @@ usb_notify_bulk_out(void)
 void
 usb_bulk_out_task(void)
 {
+    usb_check_reset();
     if (!sched_check_wake(&usb_bulk_out_wake))
         return;
     // Read data
@@ -521,11 +526,42 @@ usb_notify_ep0(void)
     sched_wake_task(&usb_ep0_wake);
 }
 
+// A USB bus reset invalidates every piece of session soft state: the
+// partially-filled transmit buffer (otherwise up to 192 bytes of
+// pre-reset frame data are pushed at the freshly enumerated host the
+// moment set_configuration re-arms the bulk endpoints -- seen on the
+// host as bytes_invalid garbage), unparsed receive data, and any
+// pending ep0 control-transfer continuation (otherwise the first
+// SETUP of the new enumeration is answered with the stale transfer,
+// costing a stall+retry round under conditions that are marginal by
+// definition). The flag is set from the reset IRQ; the clearing runs
+// in task context where the buffers are normally owned.
+static uint8_t usb_reset_pending;
+
+void
+usb_notify_reset(void)
+{
+    writeb(&usb_reset_pending, 1);
+    usb_notify_ep0();
+}
+
+static void
+usb_check_reset(void)
+{
+    if (!readb(&usb_reset_pending))
+        return;
+    writeb(&usb_reset_pending, 0);
+    transmit_pos = 0;
+    receive_pos = 0;
+    usb_xfer_flags = 0;
+}
+
 void
 usb_ep0_task(void)
 {
     if (!sched_check_wake(&usb_ep0_wake))
         return;
+    usb_check_reset();
     if (usb_xfer_flags)
         usb_do_xfer(usb_xfer_data, usb_xfer_size, usb_xfer_flags);
     else

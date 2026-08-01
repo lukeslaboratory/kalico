@@ -20,5 +20,6 @@ void usb_fill_serial(struct usb_string_descriptor *desc, int strlen, void *id);
 void usb_notify_bulk_in(void);
 void usb_notify_bulk_out(void);
 void usb_notify_ep0(void);
+void usb_notify_reset(void);
 
 #endif // usb_cdc.h

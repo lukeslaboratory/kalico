@@ -367,7 +367,20 @@ usb_reset(void)
                    | USB_EP_TX_NAK);
     bulk_in_pop_flag = USB_EP_DTOG_RX;
 
-    USB->CNTR = USB_CNTR_CTRM | USB_CNTR_RESETM;
+    // A reset ends the old session entirely: drop any pending deferred
+    // address and have the generic layer flush its soft state (stale
+    // transmit/receive buffers, interrupted ep0 transfers) before the
+    // new enumeration re-arms the endpoints.
+    set_address = 0;
+    usb_notify_reset();
+
+    // Also watch suspend/wakeup: acknowledging the suspend handshake
+    // (instead of masking it) keeps the peripheral state machine in
+    // sync with hubs that suspend ports, rather than presenting a
+    // device that ignores suspend -- a documented trigger for fussy
+    // hubs to power-cycle the port.
+    USB->CNTR = (USB_CNTR_CTRM | USB_CNTR_RESETM
+                 | USB_CNTR_SUSPM | USB_CNTR_WKUPM);
     USB->DADDR = USB_DADDR_EF;
 }
 
@@ -403,6 +416,19 @@ USB_IRQHandler(void)
         // USB Reset
         USB->ISTR = (uint16_t)~USB_ISTR_RESET;
         usb_reset();
+        return;
+    }
+    if (istr & USB_ISTR_SUSP) {
+        // Bus idle >3ms: complete the suspend handshake. The MCU keeps
+        // running (it drives a printer); this only keeps the USB
+        // peripheral's state machine consistent through suspend.
+        USB->ISTR = (uint16_t)~USB_ISTR_SUSP;
+        USB->CNTR |= USB_CNTR_FSUSP;
+    }
+    if (istr & USB_ISTR_WKUP) {
+        // Bus activity resumed
+        USB->ISTR = (uint16_t)~USB_ISTR_WKUP;
+        USB->CNTR &= ~USB_CNTR_FSUSP;
     }
 }
 
