@@ -150,6 +150,17 @@ command_queue_digital_out(uint32_t *args)
     m->on_duration = args[2];
 
     irq_disable();
+    // Execute-late tolerance: a command whose clock already passed
+    // (e.g. delivered after a USB link resurrection resumed the
+    // session) is applied promptly instead of tripping "Timer too
+    // close". Receipt itself proves the host is alive, so the
+    // max_duration dead-host protection is not weakened -- an outage
+    // longer than max_duration still shuts down DURING the outage via
+    // the existing end_time watchdog, before anything is delivered
+    // late.
+    uint32_t now = timer_read_time();
+    if (timer_is_before(time, now))
+        time = m->waketime = now + timer_from_us(500);
     int first_on_queue = move_queue_push(&m->node, &d->mq);
     if (!first_on_queue) {
         irq_enable();

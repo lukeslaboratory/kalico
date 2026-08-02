@@ -88,6 +88,11 @@ command_queue_pwm_out(uint32_t *args)
     m->value = args[2];
 
     irq_disable();
+    // Execute-late tolerance for post-resurrection delivery; see
+    // command_queue_digital_out for the safety argument.
+    uint32_t now = timer_read_time();
+    if (timer_is_before(m->waketime, now))
+        m->waketime = now + timer_from_us(500);
     int need_add_timer = move_queue_push(&m->node, &p->mq);
     irq_enable();
     if (!need_add_timer)
