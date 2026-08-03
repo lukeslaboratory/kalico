@@ -775,7 +775,7 @@ serialqueue_exit(struct serialqueue *sq)
 // ever having known the difference. All unacked blocks are then
 // force-retransmitted; the seq/ack protocol resumes the session.
 void __visible
-serialqueue_reattach(struct serialqueue *sq, int new_fd)
+serialqueue_reattach(struct serialqueue *sq, int new_fd, int drop_stale)
 {
     pthread_mutex_lock(&sq->lock);
     dup2(new_fd, sq->serial_fd);
@@ -791,7 +791,7 @@ serialqueue_reattach(struct serialqueue *sq, int new_fd)
     // (completions are awaited host-side) are always kept.
     int dropped = 0;
     double curtime = get_monotonic();
-    if (sq->ce.est_freq) {
+    if (drop_stale && sq->ce.est_freq) {
         uint64_t drop_clock = clock_from_time(&sq->ce
                                               , curtime + MIN_REQTIME_DELTA);
         struct command_queue *cq, *ncq;

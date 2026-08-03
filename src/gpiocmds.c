@@ -11,6 +11,11 @@
 #include "command.h" // DECL_COMMAND
 #include "sched.h" // sched_add_timer
 
+// Output queue commands with past clocks execute promptly instead of
+// shutting down (see command_queue_digital_out); hosts use this to know
+// stale-delivery is safe and skip their own workaround purges.
+DECL_CONSTANT("OUTPUT_EXECUTE_LATE", 1);
+
 struct digital_out_s {
     struct timer timer;
     uint32_t on_duration, off_duration, end_time;

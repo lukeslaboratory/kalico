@@ -361,8 +361,21 @@ class SerialReader:
                 continue
             self._parked_devs.append(self.serial_dev)
             self.serial_dev = serial_dev
+            # The reattach stale-command purge is a workaround for MCUs
+            # that shut down on past-clock output events. Firmware with
+            # execute-late tolerance advertises OUTPUT_EXECUTE_LATE, and
+            # for those boards purging is strictly harmful: dropping a
+            # heater PWM resend can starve the MCU's max_duration
+            # watchdog (resend cadence ~max_duration*0.8), while late
+            # delivery is now safe.
+            drop_stale = 1
+            try:
+                if self.msgparser.get_constant_int("OUTPUT_EXECUTE_LATE", 0):
+                    drop_stale = 0
+            except Exception:
+                pass
             self.ffi_lib.serialqueue_reattach(
-                self.serialqueue, serial_dev.fileno())
+                self.serialqueue, serial_dev.fileno(), drop_stale)
             self.link_resurrect_deadline = 0.0
             logging.warning("%sUSB link reattached - session resumed",
                             self.warn_prefix)
