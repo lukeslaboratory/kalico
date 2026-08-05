@@ -372,7 +372,11 @@ usb_reset(void)
     // transmit/receive buffers, interrupted ep0 transfers) before the
     // new enumeration re-arms the endpoints.
     set_address = 0;
-    usb_notify_reset();
+    // usb_notify_reset() lives in usb_cdc.c, which is only built for
+    // USB-serial configs; USBCANBUS bridge builds have no CDC state to
+    // flush (and no symbol to link against).
+    if (CONFIG_USBSERIAL)
+        usb_notify_reset();
 
     // Also watch suspend/wakeup: acknowledging the suspend handshake
     // (instead of masking it) keeps the peripheral state machine in
