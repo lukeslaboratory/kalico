@@ -45,6 +45,8 @@
   #define USB USB_DRD_FS
   #define USB_PMAADDR USB_DRD_PMAADDR
   #define USB_EPADDR_FIELD USB_CHEP_ADDR
+  // G0 renamed the legacy force-suspend bit (same position)
+  #define USB_CNTR_FSUSP USB_CNTR_SUSPEN
   #define USB_EP_CTR_RX USB_EP_VTRX
   #define USB_EP_CTR_TX USB_EP_VTTX
   #define USB_EPRX_STAT USB_EP_RX_STRX
