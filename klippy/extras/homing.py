@@ -364,6 +364,10 @@ class Homing:
                     ]
                     self.toolhead.set_position(startpos)
                     self._reset_endstop_states(endstops)
+                    # Redwood IDEX: recovery re-home after a parked-carriage
+                    # start ran at run current.
+                    self._set_homing_accel(hi.accel, pre_homing=True)
+                    self._set_homing_current(homing_axes, pre_homing=True)
 
                     hmove = HomingMove(self.printer, endstops)
                     hmove.homing_move(homepos, hi.second_homing_speed)
